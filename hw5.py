@@ -3,6 +3,7 @@ import numpy as np
 import pathlib
 import pandas as pd
 import json
+import matplotlib.pyplot as plt
 
 class QuestionnaireAnalysis:
     """
@@ -13,7 +14,17 @@ class QuestionnaireAnalysis:
     def __init__(self, data_fname: Union[pathlib.Path, str]):
         if isinstance(data_fname, str):
             data_fname = pathlib.Path(data_fname)
-        self.data_fname = data_fname
+            if data_fname.is_file():
+                self.data_fname = data_fname
+            else:
+                raise ValueError(f"File {data_fname} does not exist.")
+        elif isinstance(data_fname, pathlib.Path):
+            if data_fname.is_file():
+                self.data_fname = data_fname
+            else:
+                raise ValueError(f"File {data_fname} does not exist.")
+        else:
+            raise TypeError(f"data_fname must be a string or pathlib.Path, got {type(data_fname)}")
         self.data = None
 
     def read_data(self):
@@ -21,7 +32,11 @@ class QuestionnaireAnalysis:
         Reads the json data located in self.data_fname into memory, to
         the attribute self.data.
         """
-        pass
+        try:
+            with open(self.data_fname, "r") as f:
+                self.data = pd.DataFrame(json.load(f))
+        except Exception as e:
+            raise ValueError(f"Error reading file {self.data_fname}: {e}")
 
     def show_age_distrib(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -34,7 +49,21 @@ class QuestionnaireAnalysis:
         bins : np.ndarray
           Bin edges
         """
-        pass
+        ages = self.data["age"].values
+        ages = ages[~np.isnan(ages.astype(float))]
+
+        bins = np.arange(0, 101, 10)
+        hist, edges = np.histogram(ages, bins=bins)
+
+        plt.hist(ages, bins=edges)
+        plt.xticks(bins)
+        plt.yticks(np.arange(0, 31, 10), np.arange(0, 31, 10))
+        plt.xlabel("Age")
+        plt.ylabel("Number of people in a given bin")
+        plt.title("Histogram of age distribution")
+        plt.show()
+
+        return hist, bins
 
     def remove_rows_without_mail(self) -> pd.DataFrame:
         """
@@ -46,7 +75,25 @@ class QuestionnaireAnalysis:
           A corrected DataFrame, i.e. the same table but with the erroneous rows removed and
           the (ordinal) index after a reset.
         """
-        pass
+        def is_valid_email(email: str) -> bool:
+            if not isinstance(email, str):
+                return False
+            if email.count("@") != 1:
+                return False
+            if email.startswith("@") or email.endswith("@"):
+                return False
+            if "." not in email:
+                return False
+            if email.startswith(".") or email.endswith("."):
+                return False
+            at_index = email.index("@")
+            if at_index + 1 < len(email) and email[at_index + 1] == ".":
+                return False
+            return True
+
+        valid_emails_mask = self.data["email"].apply(is_valid_email)
+        corrected_df = self.data[valid_emails_mask].reset_index(drop=True)
+        return corrected_df
 
     def fill_na_with_mean(self) -> Tuple[pd.DataFrame, np.ndarray]:
         """
@@ -61,7 +108,22 @@ class QuestionnaireAnalysis:
         arr : np.ndarray
           Row indices of the students that their new grades were generated
         """
-        pass
+        corrected_df = self.data.copy()
+
+        # go over columns q1, q2, q3, q4, q5 and accumulate row indices where one or more of those column values are 'nan'
+        relevant_cols = ["q1", "q2", "q3", "q4", "q5"]
+        rows_with_nans = np.isnan(corrected_df[relevant_cols].astype(float)).any(axis=1).to_numpy().nonzero()[0]
+
+        for idx in rows_with_nans:
+            row = corrected_df.loc[idx]
+            nan_cols = [q for q in relevant_cols if row[q] == 'nan']
+            relevant_scores = [row[q] for q in set(relevant_cols) - set(nan_cols)]
+            # round mean to 1 decimal place
+            mean_grade = (np.sum(relevant_scores) / len(relevant_scores)).round(1)
+            for col in nan_cols:
+                corrected_df.loc[idx, col] = mean_grade
+
+        return corrected_df, rows_with_nans
 
     def score_subjects(self, maximal_nans_per_sub: int = 1) -> pd.DataFrame:
         """
@@ -78,12 +140,26 @@ class QuestionnaireAnalysis:
         maximal_nans_per_sub : int, optional
             Number of allowed NaNs per subject before giving a NA score.
 
+        df : pd.DataFrame, optional
+            A DataFrame to score. If None, the original DataFrame is used.
+
         Returns
         -------
         pd.DataFrame
             A new DF with a new column - "score".
         """
-        pass
+        def calculate_score(row):
+            relevant_cols = ["q1", "q2", "q3", "q4", "q5"]
+            nans_count = np.isnan(row[relevant_cols].astype(float)).sum()
+            if nans_count > maximal_nans_per_sub:
+                return pd.NA
+            else:
+                mean_score = row[relevant_cols].astype(float).mean()
+                return int(np.floor(mean_score))
+
+        scored_df = self.data.copy()
+        scored_df["score"] = scored_df.apply(calculate_score, axis=1).astype("UInt8")
+        return scored_df
 
     def correlate_gender_age(self) -> pd.DataFrame:
         """
@@ -96,5 +172,35 @@ class QuestionnaireAnalysis:
             A DataFrame with a MultiIndex containing the gender and whether the subject is above
             40 years of age, and the average score in each of the five questions.
         """
-        pass
-    
+        df = self.data.copy()
+        df = df[~np.isnan(df["age"].astype(float))].reset_index(drop=True)
+        df["age"] = pd.to_numeric(df["age"]) > 40
+        # Convert q1-q5 columns to numeric (converts string 'nan' to actual NaN), then group and mean
+        df[["q1", "q2", "q3", "q4", "q5"]] = df[["q1", "q2", "q3", "q4", "q5"]].apply(pd.to_numeric, errors='coerce')
+        grouped_df = df.groupby(["gender", "age"])[["q1", "q2", "q3", "q4", "q5"]].mean()
+
+        return grouped_df
+
+
+
+if __name__ == '__main__':
+
+    plot = True
+
+    questionnaire_analysis = QuestionnaireAnalysis(data_fname="data.json")
+    questionnaire_analysis.read_data()
+    # questionnaire_analysis.show_age_distrib()
+    # questionnaire_analysis.remove_rows_without_mail()
+    # questionnaire_analysis.fill_na_with_mean()
+    # questionnaire_analysis.score_subjects()
+    grouped_df = questionnaire_analysis.correlate_gender_age()
+
+    if plot:
+        grouped_df.plot(kind="bar", rot=45)
+        plt.title("Average Score per Question by Gender and Age Group")
+        plt.xlabel("Gender and Age Group")
+        plt.ylabel("Average Score")
+        # place the legend where it does not occlude the bars, preferably somewhere at the plot's top
+        plt.legend(title="Questions", bbox_to_anchor=(1.05, 1))
+        plt.tight_layout()
+        plt.show()
